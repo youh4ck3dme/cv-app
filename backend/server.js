@@ -87,6 +87,21 @@ const permissionsLimiter = rateLimit({
   }
 });
 
+const telemetryLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 3, // limit each IP to 3 requests per minute to prevent telemetry flood / spam
+  message: { error: 'Too many telemetry reports. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res, next, options) => {
+    logSecurityEvent('rate_limit_exceeded', {
+      ip: req.ip,
+      path: req.path
+    });
+    res.status(options.statusCode).send(options.message);
+  }
+});
+
 const entitlementCache = new Map();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache TTL
 
@@ -188,7 +203,10 @@ function generatePayloadSignature(payload) {
     canGenerateCV: payload.canGenerateCV,
     canExportPDF: payload.canExportPDF,
     isPremium: payload.isPremium,
-    expiresAt: payload.expiresAt,
+    expiresAt: payload.expiresAt || null,
+    appUserId: payload.appUserId || null,
+    jti: payload.jti || null,
+    iat: payload.iat || null,
   });
   return crypto.sign(null, Buffer.from(message), ED25519_PRIVATE_KEY).toString('hex');
 }
@@ -447,6 +465,9 @@ app.post('/api/permissions', securityHardeningMiddleware, permissionsLimiter, as
       canExportPDF,
       isPremium,
       expiresAt,
+      appUserId: clientAppUserId || null,
+      jti: crypto.randomUUID(),
+      iat: Math.floor(Date.now() / 1000),
     };
 
     const signature = generatePayloadSignature(payload);
@@ -455,7 +476,8 @@ app.post('/api/permissions', securityHardeningMiddleware, permissionsLimiter, as
       appUserId: clientAppUserId,
       hasCustomKey: !!clientCustomApiKey,
       isPremium,
-      expiresAt
+      expiresAt,
+      jti: payload.jti
     });
 
     res.json({
@@ -468,6 +490,26 @@ app.post('/api/permissions', securityHardeningMiddleware, permissionsLimiter, as
       error: error.message
     });
     console.error('Permissions check error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.post('/api/security-telemetry', securityHardeningMiddleware, telemetryLimiter, (req, res) => {
+  try {
+    const { eventType, details, appUserId } = req.body;
+
+    logSecurityEvent('client_security_alert', {
+      severity: 'CRITICAL',
+      alertType: eventType || 'UNKNOWN_ALERT',
+      appUserId: appUserId || 'UNKNOWN_USER',
+      details: details || {},
+      ip: req.ip
+    });
+
+    res.status(204).end();
+  } catch (error) {
+    logSecurityEvent('telemetry_endpoint_error', {
+      error: error.message
+    });
     res.status(500).json({ error: 'Internal server error' });
   }
 });

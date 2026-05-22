@@ -3,6 +3,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
+import 'package:http/http.dart' as http;
 import '../services/ai_service.dart';
 
 /// 🔒 State representation for the Hybrid Permission Model
@@ -14,6 +15,9 @@ class PermissionsState {
   final String? lastUpdated;
   final String? expiresAt;
   final bool upgradeRequired;
+  final String? appUserId;
+  final String? jti;
+  final int? iat;
 
   PermissionsState({
     required this.canGenerateCV,
@@ -23,6 +27,9 @@ class PermissionsState {
     this.lastUpdated,
     this.expiresAt,
     this.upgradeRequired = false,
+    this.appUserId,
+    this.jti,
+    this.iat,
   });
 
   PermissionsState copyWith({
@@ -33,6 +40,9 @@ class PermissionsState {
     String? lastUpdated,
     String? expiresAt,
     bool? upgradeRequired,
+    String? appUserId,
+    String? jti,
+    int? iat,
   }) {
     return PermissionsState(
       canGenerateCV: canGenerateCV ?? this.canGenerateCV,
@@ -42,6 +52,9 @@ class PermissionsState {
       lastUpdated: lastUpdated ?? this.lastUpdated,
       expiresAt: expiresAt ?? this.expiresAt,
       upgradeRequired: upgradeRequired ?? this.upgradeRequired,
+      appUserId: appUserId ?? this.appUserId,
+      jti: jti ?? this.jti,
+      iat: iat ?? this.iat,
     );
   }
 }
@@ -65,13 +78,27 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
   }
 
   /// Verifies asymmetric Ed25519 signature for integrity verification
-  Future<bool> _verifySignature(bool canGen, bool canExp, bool isPrem,
-      String? expiresAt, String? signatureHex) async {
+  Future<bool> _verifySignature({
+    required bool canGen,
+    required bool canExp,
+    required bool isPrem,
+    required String? expiresAt,
+    required String? appUserId,
+    required String? jti,
+    required int? iat,
+    required String? signatureHex,
+  }) async {
     if (signatureHex == null) return false;
     try {
       final expiresVal = expiresAt == null ? 'null' : '"$expiresAt"';
+      final cleanAppUserId =
+          (appUserId == '' || appUserId == null) ? null : appUserId;
+      final appUserVal = cleanAppUserId == null ? 'null' : '"$cleanAppUserId"';
+      final jtiVal = jti == null ? 'null' : '"$jti"';
+      final iatVal = iat == null ? 'null' : '$iat';
+
       final message =
-          '{"canGenerateCV":$canGen,"canExportPDF":$canExp,"isPremium":$isPrem,"expiresAt":$expiresVal}';
+          '{"canGenerateCV":$canGen,"canExportPDF":$canExp,"isPremium":$isPrem,"expiresAt":$expiresVal,"appUserId":$appUserVal,"jti":$jtiVal,"iat":$iatVal}';
 
       final algorithm = Ed25519();
       final signatureBytes = _hexToBytes(signatureHex);
@@ -104,9 +131,46 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
     return bytes;
   }
 
+  /// 🔒 Client-to-Server Telemetry Reporting Bridge
+  Future<void> _reportTelemetryAlert(
+      String eventType, Map<String, dynamic> details) async {
+    try {
+      final String telemetryUrl = const String.fromEnvironment('BACKEND_URL',
+              defaultValue: 'http://10.0.2.2:3000/api/analyze')
+          .replaceAll('/analyze', '/security-telemetry');
+
+      String? activeAppUserId;
+      try {
+        activeAppUserId = await Purchases.appUserID;
+      } catch (_) {}
+
+      await http
+          .post(
+            Uri.parse(telemetryUrl),
+            headers: {
+              'Content-Type': 'application/json',
+              'x-app-version': '1.0.0',
+            },
+            body: jsonEncode({
+              'eventType': eventType,
+              'appUserId': activeAppUserId,
+              'details': details,
+            }),
+          )
+          .timeout(const Duration(seconds: 4));
+    } catch (_) {
+      // Fail silently to prevent telemetry requests from blocking app usage
+    }
+  }
+
   Future<void> init() async {
     // 1. Instantly restore cached permissions for zero-lag and offline startup
     try {
+      String? activeAppUserId;
+      try {
+        activeAppUserId = await Purchases.appUserID;
+      } catch (_) {}
+
       final storedGenRaw = await _storage.read(key: 'cached_canGenerateCV');
       final canGenerateVal =
           storedGenRaw != null ? (storedGenRaw == 'true') : true;
@@ -117,12 +181,51 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
           await _storage.read(key: 'cached_isPremium') == 'true';
       final lastUpd = await _storage.read(key: 'cached_lastUpdated');
       final expiresAtVal = await _storage.read(key: 'cached_expiresAt');
+      final cachedAppUserId = await _storage.read(key: 'cached_appUserId');
+      final cachedJti = await _storage.read(key: 'cached_jti');
+      final cachedIatRaw = await _storage.read(key: 'cached_iat');
+      final cachedIat =
+          cachedIatRaw != null ? int.tryParse(cachedIatRaw) : null;
       final cachedSig = await _storage.read(key: 'cached_signature');
 
       bool isSignatureValid = false;
       if (cachedSig != null) {
-        isSignatureValid = await _verifySignature(canGenerateVal, canExportVal,
-            isPremiumVal, expiresAtVal, cachedSig);
+        isSignatureValid = await _verifySignature(
+          canGen: canGenerateVal,
+          canExp: canExportVal,
+          isPrem: isPremiumVal,
+          expiresAt: expiresAtVal,
+          appUserId: cachedAppUserId,
+          jti: cachedJti,
+          iat: cachedIat,
+          signatureHex: cachedSig,
+        );
+      }
+
+      bool isUserMatched = true;
+      if (cachedSig != null && isSignatureValid) {
+        final cleanCachedUser =
+            (cachedAppUserId == '' || cachedAppUserId == null)
+                ? null
+                : cachedAppUserId;
+        final cleanActiveUser =
+            (activeAppUserId == '' || activeAppUserId == null)
+                ? null
+                : activeAppUserId;
+        if (cleanCachedUser != cleanActiveUser) {
+          isUserMatched = false;
+          _reportTelemetryAlert('local_cache_user_mismatch', {
+            'cachedUser': cachedAppUserId,
+            'currentUser': activeAppUserId,
+          });
+        }
+      }
+
+      if (cachedSig != null && !isSignatureValid) {
+        _reportTelemetryAlert('local_cache_signature_failed', {
+          'jti': cachedJti,
+          'iat': cachedIat,
+        });
       }
 
       bool isExpired = false;
@@ -137,13 +240,16 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
         }
       }
 
-      if (!isSignatureValid || isExpired) {
+      if (!isSignatureValid || isExpired || !isUserMatched) {
         // Cache has been tampered with or subscription has expired! Invalidate cache.
         await _storage.delete(key: 'cached_canGenerateCV');
         await _storage.delete(key: 'cached_canExportPDF');
         await _storage.delete(key: 'cached_isPremium');
         await _storage.delete(key: 'cached_lastUpdated');
         await _storage.delete(key: 'cached_expiresAt');
+        await _storage.delete(key: 'cached_appUserId');
+        await _storage.delete(key: 'cached_jti');
+        await _storage.delete(key: 'cached_iat');
         await _storage.delete(key: 'cached_signature');
 
         state = PermissionsState(
@@ -153,6 +259,9 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
           lastUpdated: null,
           expiresAt: null,
           isLoading: false,
+          appUserId: null,
+          jti: null,
+          iat: null,
         );
       } else {
         state = PermissionsState(
@@ -162,6 +271,9 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
           lastUpdated: lastUpd,
           expiresAt: expiresAtVal,
           isLoading: false,
+          appUserId: cachedAppUserId,
+          jti: cachedJti,
+          iat: cachedIat,
         );
       }
     } catch (_) {
@@ -207,13 +319,57 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
       final newIsPremium = perms['isPremium'] == true;
       final newExpiresAt = perms['expiresAt'] as String?;
       final serverSignature = perms['signature'] as String?;
+      final newAppUserId = perms['appUserId'] as String?;
+      final newJti = perms['jti'] as String?;
+      final newIat = perms['iat'] as int?;
       final nowTimestamp = DateTime.now().toIso8601String();
 
       // Verify server signature before trusting it
       bool isSigValid = false;
       if (serverSignature != null) {
-        isSigValid = await _verifySignature(newCanGenerate, newCanExport,
-            newIsPremium, newExpiresAt, serverSignature);
+        isSigValid = await _verifySignature(
+          canGen: newCanGenerate,
+          canExp: newCanExport,
+          isPrem: newIsPremium,
+          expiresAt: newExpiresAt,
+          appUserId: newAppUserId,
+          jti: newJti,
+          iat: newIat,
+          signatureHex: serverSignature,
+        );
+      }
+
+      if (serverSignature != null && isSigValid) {
+        final cleanNewUser =
+            (newAppUserId == '' || newAppUserId == null) ? null : newAppUserId;
+        final cleanActiveUser =
+            (appUserId == '' || appUserId == null) ? null : appUserId;
+        if (cleanNewUser != cleanActiveUser) {
+          isSigValid = false;
+          _reportTelemetryAlert('live_response_user_mismatch', {
+            'responseUser': newAppUserId,
+            'clientUser': appUserId,
+          });
+        }
+
+        if (newIat != null) {
+          final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+          // Tolerate clock skew (e.g. 5 minutes in future) and reject if older than 24 hours (86400 seconds)
+          if (newIat > nowSec + 300 || nowSec - newIat > 86400) {
+            isSigValid = false;
+            _reportTelemetryAlert('live_response_iat_skew_or_replayed', {
+              'iat': newIat,
+              'now': nowSec,
+            });
+          }
+        }
+      }
+
+      if (serverSignature != null && !isSigValid) {
+        _reportTelemetryAlert('live_signature_verification_failed', {
+          'jti': newJti,
+          'iat': newIat,
+        });
       }
 
       if (!isSigValid) {
@@ -225,6 +381,9 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
           expiresAt: null,
           isLoading: false,
           upgradeRequired: false,
+          appUserId: null,
+          jti: null,
+          iat: null,
         );
         return;
       }
@@ -258,6 +417,21 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
       } else {
         await _storage.delete(key: 'cached_expiresAt');
       }
+      if (newAppUserId != null) {
+        await _storage.write(key: 'cached_appUserId', value: newAppUserId);
+      } else {
+        await _storage.delete(key: 'cached_appUserId');
+      }
+      if (newJti != null) {
+        await _storage.write(key: 'cached_jti', value: newJti);
+      } else {
+        await _storage.delete(key: 'cached_jti');
+      }
+      if (newIat != null) {
+        await _storage.write(key: 'cached_iat', value: newIat.toString());
+      } else {
+        await _storage.delete(key: 'cached_iat');
+      }
       await _storage.write(key: 'cached_signature', value: serverSignature);
 
       state = PermissionsState(
@@ -268,6 +442,9 @@ class PermissionsNotifier extends StateNotifier<PermissionsState> {
         expiresAt: newExpiresAt,
         isLoading: false,
         upgradeRequired: false,
+        appUserId: newAppUserId,
+        jti: newJti,
+        iat: newIat,
       );
     } catch (e) {
       // 🛡️ Safe fallback: retain the last known cached states if network is down

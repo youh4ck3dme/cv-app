@@ -158,11 +158,21 @@ void main() {
   final Map<String, String> storage = {};
 
   // Helper to generate signature
-  Future<String> generateSignature(
-      bool canGen, bool canExp, bool isPrem, String? expiresAt) async {
+  Future<String> generateSignature({
+    required bool canGen,
+    required bool canExp,
+    required bool isPrem,
+    required String? expiresAt,
+    required String? appUserId,
+    required String? jti,
+    required int? iat,
+  }) async {
     final expiresVal = expiresAt == null ? 'null' : '"$expiresAt"';
+    final appUserVal = appUserId == null ? 'null' : '"$appUserId"';
+    final jtiVal = jti == null ? 'null' : '"$jti"';
+    final iatVal = iat == null ? 'null' : '$iat';
     final message =
-        '{"canGenerateCV":$canGen,"canExportPDF":$canExp,"isPremium":$isPrem,"expiresAt":$expiresVal}';
+        '{"canGenerateCV":$canGen,"canExportPDF":$canExp,"isPremium":$isPrem,"expiresAt":$expiresVal,"appUserId":$appUserVal,"jti":$jtiVal,"iat":$iatVal}';
 
     // Hex-encoded seed for Ed25519 key pair
     const seedHex =
@@ -187,12 +197,25 @@ void main() {
   setUp(() async {
     storage.clear();
     MockHttpOverrides.responseStatusCode = 200;
+
+    final iatVal = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     MockHttpOverrides.responsePayload = {
       'canGenerateCV': true,
       'canExportPDF': false,
       'isPremium': false,
       'expiresAt': null,
-      'signature': await generateSignature(true, false, false, null),
+      'appUserId': null,
+      'jti': 'test-uuid-111',
+      'iat': iatVal,
+      'signature': await generateSignature(
+        canGen: true,
+        canExp: false,
+        isPrem: false,
+        expiresAt: null,
+        appUserId: null,
+        jti: 'test-uuid-111',
+        iat: iatVal,
+      ),
     };
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -242,12 +265,24 @@ void main() {
       () async {
     final futureDate =
         DateTime.now().add(const Duration(days: 5)).toIso8601String();
-    final sig = await generateSignature(true, true, true, futureDate);
+    final iatVal = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final sig = await generateSignature(
+      canGen: true,
+      canExp: true,
+      isPrem: true,
+      expiresAt: futureDate,
+      appUserId: null,
+      jti: 'cached-uuid-555',
+      iat: iatVal,
+    );
 
     storage['cached_canGenerateCV'] = 'true';
     storage['cached_canExportPDF'] = 'true';
     storage['cached_isPremium'] = 'true';
     storage['cached_expiresAt'] = futureDate;
+    storage['cached_appUserId'] = '';
+    storage['cached_jti'] = 'cached-uuid-555';
+    storage['cached_iat'] = iatVal.toString();
     storage['cached_signature'] = sig;
     storage['cached_lastUpdated'] = DateTime.now().toIso8601String();
 
@@ -257,6 +292,9 @@ void main() {
       'canExportPDF': true,
       'isPremium': true,
       'expiresAt': futureDate,
+      'appUserId': null,
+      'jti': 'cached-uuid-555',
+      'iat': iatVal,
       'signature': sig,
     };
 
@@ -299,12 +337,24 @@ void main() {
       () async {
     final pastDate =
         DateTime.now().subtract(const Duration(days: 1)).toIso8601String();
-    final sig = await generateSignature(true, true, true, pastDate);
+    final iatVal = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final sig = await generateSignature(
+      canGen: true,
+      canExp: true,
+      isPrem: true,
+      expiresAt: pastDate,
+      appUserId: null,
+      jti: 'cached-uuid-past',
+      iat: iatVal,
+    );
 
     storage['cached_canGenerateCV'] = 'true';
     storage['cached_canExportPDF'] = 'true';
     storage['cached_isPremium'] = 'true';
     storage['cached_expiresAt'] = pastDate;
+    storage['cached_appUserId'] = '';
+    storage['cached_jti'] = 'cached-uuid-past';
+    storage['cached_iat'] = iatVal.toString();
     storage['cached_signature'] = sig;
     storage['cached_lastUpdated'] = DateTime.now().toIso8601String();
 
@@ -335,6 +385,82 @@ void main() {
 
     expect(notifier.state.upgradeRequired, isTrue);
     expect(notifier.state.canGenerateCV, isFalse);
+    expect(notifier.state.canExportPDF, isFalse);
+    expect(notifier.state.isPremium, isFalse);
+  });
+
+  test(
+      'PermissionsNotifier invalidates cache and downgrades when cached appUserId does not match active appUserId (Token sharing defense)',
+      () async {
+    final futureDate =
+        DateTime.now().add(const Duration(days: 5)).toIso8601String();
+    final iatVal = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    // Sign for 'another_user'
+    final sig = await generateSignature(
+      canGen: true,
+      canExp: true,
+      isPrem: true,
+      expiresAt: futureDate,
+      appUserId: 'another_user',
+      jti: 'test-uuid-sharing',
+      iat: iatVal,
+    );
+
+    storage['cached_canGenerateCV'] = 'true';
+    storage['cached_canExportPDF'] = 'true';
+    storage['cached_isPremium'] = 'true';
+    storage['cached_expiresAt'] = futureDate;
+    storage['cached_appUserId'] = 'another_user';
+    storage['cached_jti'] = 'test-uuid-sharing';
+    storage['cached_iat'] = iatVal.toString();
+    storage['cached_signature'] = sig;
+    storage['cached_lastUpdated'] = DateTime.now().toIso8601String();
+
+    final notifier = PermissionsNotifier(autoInit: false);
+    await notifier.init();
+
+    // Since Purchases.appUserID returns null or empty in tests, it won't match 'another_user', so cache is cleared.
+    expect(notifier.state.canExportPDF, isFalse);
+    expect(notifier.state.isPremium, isFalse);
+    expect(storage['cached_signature'], null);
+  });
+
+  test(
+      'PermissionsNotifier invalidates response and downgrades when live response iat is replayed/too old (Replay defense)',
+      () async {
+    // Generate signature with an extremely old iat timestamp (e.g., 2 days ago)
+    final pastIat =
+        (DateTime.now().millisecondsSinceEpoch ~/ 1000) - 172800; // 48h ago
+    final futureDate =
+        DateTime.now().add(const Duration(days: 5)).toIso8601String();
+
+    final sig = await generateSignature(
+      canGen: true,
+      canExp: true,
+      isPrem: true,
+      expiresAt: futureDate,
+      appUserId: null,
+      jti: 'test-uuid-replay',
+      iat: pastIat,
+    );
+
+    MockHttpOverrides.responseStatusCode = 200;
+    MockHttpOverrides.responsePayload = {
+      'canGenerateCV': true,
+      'canExportPDF': true,
+      'isPremium': true,
+      'expiresAt': futureDate,
+      'appUserId': null,
+      'jti': 'test-uuid-replay',
+      'iat': pastIat,
+      'signature': sig,
+    };
+
+    final notifier = PermissionsNotifier(autoInit: false);
+    await notifier.refreshPermissions();
+
+    // Since iat is too old, it should fail verification and fall back to free tier
     expect(notifier.state.canExportPDF, isFalse);
     expect(notifier.state.isPremium, isFalse);
   });
