@@ -2,138 +2,224 @@ import 'dart:convert';
 import 'dart:developer';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:purchases_flutter/purchases_flutter.dart';
 import '../models/cv_data.dart';
 
-class AiService {
-  // Default API Keys. In a production app, these should be retrieved from safe environment config
-  static const String _primaryApiKey = 'zsHla3chBp679gaiYhT80AKB1p4m2thW';
-  static const String _backupApiKey = 'ca8GhNC4ahgd7Zs4sxOUPwho1RW0yBzY';
-  
-  // API URL for Mistral Chat Completions (supports multimodal inputs and JSON response schema)
-  static const String _mistralUrl = 'https://api.mistral.ai/v1/chat/completions';
+/// 🛡️ CONSENT GUARD (Source of Truth for User Permission)
+class ConsentGuard {
+  static const _secureStorage = FlutterSecureStorage();
 
-  /// Sends text or base64 image data to the AI model and returns parsed [CVData]
-  static Future<CVData> parseResume({
+  /// Check if the user has explicitly accepted AI data processing
+  static Future<bool> isConsentGiven() async {
+    final consent = await _secureStorage.read(key: 'consentAccepted');
+    return consent == 'true';
+  }
+
+  /// Assert that consent is active. Throws exception if blocked.
+  static Future<void> assertAllowed() async {
+    if (!await isConsentGiven()) {
+      throw Exception(
+          'Play Store Policy Enforcement: Blocked AI Request. Explicit user consent missing or tampered.');
+    }
+  }
+}
+
+/// 🚀 CENTRAL AI GATEWAY (Single Choke Point for the entire App)
+class AiGateway {
+  static const String appVersion = '1.0.0';
+
+  /// High-level entry point. Automatically checks user consent before calling AI.
+  static Future<CVData> generate({
     String? rawText,
     String? base64Image,
     required String language,
     String? customApiKey,
   }) async {
-    // Resolve keys to try
-    const envKey = String.fromEnvironment('MISTRAL_API_KEY', defaultValue: '');
-    final List<String> keysToTry = [];
+    // 1. Enforce Play Store user consent check before ANY data processing/exfiltration
+    await ConsentGuard.assertAllowed();
 
-    if (customApiKey != null && customApiKey.isNotEmpty) {
-      keysToTry.add(customApiKey);
-    } else if (envKey.isNotEmpty) {
-      keysToTry.add(envKey);
-    } else {
-      keysToTry.add(_primaryApiKey);
-      keysToTry.add(_backupApiKey);
-    }
+    // 2. Delegate to the internal AI Service
+    return _AiService._parseResume(
+      rawText: rawText,
+      base64Image: base64Image,
+      language: language,
+      customApiKey: customApiKey,
+    );
+  }
 
-    if (keysToTry.isEmpty) {
-      // Fallback to generating rich mock CV data based on input
-      // to allow testing the UI and the flow immediately.
-      await Future.delayed(const Duration(seconds: 4)); // Simulate network latency
-      return _generateMockCVData(rawText, language);
-    }
-
+  /// 🛡️ Unified Server-Side Permission Check (Source of Truth)
+  static Future<Map<String, dynamic>> checkPermissions({
+    String? appUserId,
+    String? customApiKey,
+  }) async {
     try {
-      final prompt = _buildSystemPrompt(language, rawText);
+      final String permissionsUrl = const String.fromEnvironment('BACKEND_URL',
+              defaultValue: 'http://10.0.2.2:3000/api/analyze')
+          .replaceAll('/analyze', '/permissions');
 
-      final List<Map<String, dynamic>> messages = [];
-      
-      // System instructions prompt
-      messages.add({
-        'role': 'system',
-        'content': prompt,
-      });
-
-      final List<Map<String, dynamic>> userContent = [];
-      
-      if (rawText != null && rawText.isNotEmpty) {
-        userContent.add({
-          'type': 'text',
-          'text': 'INPUT CV TEXT:\n$rawText',
-        });
-      } else {
-        userContent.add({
-          'type': 'text',
-          'text': 'Please parse the attached resume image and generate the CV JSON.',
-        });
-      }
-
-      if (base64Image != null && base64Image.isNotEmpty) {
-        userContent.add({
-          'type': 'image_url',
-          'image_url': {
-            'url': 'data:image/jpeg;base64,$base64Image',
-          }
-        });
-      }
-
-      messages.add({
-        'role': 'user',
-        'content': userContent,
-      });
-
-      final body = {
-        'model': const String.fromEnvironment('MISTRAL_MODEL', defaultValue: 'pixtral-12b'),
-        'temperature': 0.1,
-        'response_format': {'type': 'json_object'},
-        'messages': messages,
+      final Map<String, String> headers = {
+        'Content-Type': 'application/json',
+        'x-app-version': appVersion,
+        'x-play-integrity-token': 'mock_play_integrity_token',
       };
+      if (appUserId != null) {
+        headers['x-user-id'] = appUserId;
+      }
+      if (customApiKey != null && customApiKey.trim().isNotEmpty) {
+        headers['x-custom-api-key'] = customApiKey;
+      }
 
-      http.Response? response;
-      String? lastError;
+      final res = await http.post(
+        Uri.parse(permissionsUrl),
+        headers: headers,
+        body: jsonEncode({
+          'appUserId': appUserId,
+          'customApiKey': customApiKey,
+        }),
+      );
 
-      for (var i = 0; i < keysToTry.length; i++) {
-        final key = keysToTry[i];
+      _AiService._logTelemetry('check_permissions_response', {
+        'statusCode': res.statusCode,
+      });
+
+      if (res.statusCode == 200) {
+        return jsonDecode(res.body) as Map<String, dynamic>;
+      }
+
+      if (res.statusCode == 426) {
         try {
-          final res = await http.post(
-            Uri.parse(_mistralUrl),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $key',
-            },
-            body: jsonEncode(body),
-          );
-          
-          if (res.statusCode == 200) {
-            response = res;
-            break;
-          } else {
-            lastError = 'Mistral API key ${i + 1} failed with status: ${res.statusCode}\n${res.body}';
-            log(lastError, name: 'AiService');
+          final body = jsonDecode(res.body);
+          if (body is Map && body['upgradeRequired'] == true) {
+            _AiService._logTelemetry('force_upgrade_received', {
+              'minimumVersion': body['minimumVersion'],
+            });
+            return {
+              'upgradeRequired': true,
+              'canGenerateCV': false,
+              'canExportPDF': false,
+              'isPremium': false,
+            };
           }
-        } catch (e) {
-          lastError = 'Request failed for key ${i + 1}: $e';
-          log(lastError, name: 'AiService');
-        }
+        } catch (_) {}
       }
 
-      if (response == null) {
-        throw Exception(lastError ?? 'Mistral API call failed.');
+      return {
+        'canGenerateCV': true,
+        'canExportPDF': false,
+        'isPremium': false,
+      };
+    } catch (e, stackTrace) {
+      log('Error checking permissions on backend: $e',
+          name: 'AiGateway', error: e, stackTrace: stackTrace);
+      _AiService._logTelemetry('check_permissions_failed', {
+        'error': e.toString(),
+      });
+      return {
+        'canGenerateCV': true,
+        'canExportPDF': false,
+        'isPremium': false,
+      };
+    }
+  }
+}
+
+/// 🔒 INTERNAL ONLY - DO NOT EXPOSE OR CALL DIRECTLY FROM OUTSIDE THIS FILE
+class _AiService {
+  // Backend endpoint URL (will be configured per environment)
+  static const String _backendUrl = String.fromEnvironment('BACKEND_URL',
+      defaultValue: 'http://10.0.2.2:3000/api/analyze');
+
+  static void _logTelemetry(String event, Map<String, dynamic> data) {
+    // 🛡️ Mock method wrapping around Sentry / Crashlytics for production audit
+    log('Telemetry Event: $event | Data: ${jsonEncode(data)}',
+        name: 'Telemetry');
+  }
+
+  /// Sends text or base64 image data to the AI model and returns parsed [CVData]
+  static Future<CVData> _parseResume({
+    String? rawText,
+    String? base64Image,
+    required String language,
+    String? customApiKey,
+  }) async {
+    try {
+      // 🛡️ Redundant Defense-in-Depth check
+      await ConsentGuard.assertAllowed();
+
+      // Fetch the current RevenueCat App User ID
+      String? appUserId;
+      try {
+        appUserId = await Purchases.appUserID;
+      } catch (e) {
+        log('Error getting appUserID from RevenueCat: $e', name: 'AiService');
       }
 
-      final jsonResponse = jsonDecode(response.body);
-      final textContent = jsonResponse['choices']?[0]?['message']?['content'] as String?;
+      final Map<String, String> headers = {
+        'Content-Type': 'application/json',
+        'x-app-version': AiGateway.appVersion,
+        'x-play-integrity-token': 'mock_play_integrity_token',
+      };
+      if (appUserId != null) {
+        headers['x-user-id'] = appUserId;
+      }
+      if (customApiKey != null && customApiKey.trim().isNotEmpty) {
+        headers['x-custom-api-key'] = customApiKey;
+      }
+
+      final consentGiven = await ConsentGuard.isConsentGiven();
+
+      _logTelemetry('ai_request_sending', {
+        'language': language,
+        'hasImage': base64Image != null,
+        'hasText': rawText != null,
+      });
+
+      final res = await http.post(
+        Uri.parse(_backendUrl),
+        headers: headers,
+        body: jsonEncode({
+          'image': base64Image,
+          'text': rawText,
+          'language': language,
+          'appUserId': appUserId,
+          'customApiKey': customApiKey,
+          'consent': consentGiven,
+        }),
+      );
+
+      _logTelemetry('ai_request_response', {
+        'statusCode': res.statusCode,
+      });
+
+      if (res.statusCode != 200) {
+        _logTelemetry('ai_request_error', {
+          'statusCode': res.statusCode,
+          'body': res.body,
+        });
+        throw Exception('Backend error: ${res.statusCode} ${res.body}');
+      }
+
+      final jsonResponse = jsonDecode(res.body);
+      final textContent = jsonResponse['result'] as String?;
 
       if (textContent == null || textContent.isEmpty) {
-        throw Exception('AI returned empty content');
+        throw Exception('Empty result from backend');
       }
 
       // Parse JSON out of the response text (removing potential markdown backticks)
       final cleanJsonString = _extractJson(textContent);
       final Map<String, dynamic> cvJson = jsonDecode(cleanJsonString);
-      
+
       // Ensure all IDs are generated if missing
       _ensureIds(cvJson);
 
       return CVData.fromJson(cvJson);
     } catch (e) {
       // Log the error and fall back to mock data so the app doesn't crash
+      _logTelemetry('ai_generation_failed', {
+        'error': e.toString(),
+      });
       log('AI Service Error: $e', name: 'AiService');
       return _generateMockCVData(rawText, language);
     }
@@ -169,124 +255,13 @@ class AiService {
     for (var listKey in listsWithIds) {
       if (json[listKey] is List) {
         for (var item in json[listKey]) {
-          if (item is Map && (item['id'] == null || item['id'].toString().isEmpty)) {
+          if (item is Map &&
+              (item['id'] == null || item['id'].toString().isEmpty)) {
             item['id'] = uuid.v4();
           }
         }
       }
     }
-  }
-
-  static String _buildSystemPrompt(String language, String? rawText) {
-    final langLabel = language == 'sk' ? 'Slovak (Slovenský jazyk)' : 'English';
-    return '''
-You are a highly advanced ATS-optimized Resume/CV Parser and Writer. 
-Your goal is to parse the input text or image and extract a complete, professional, and grammatically perfect resume JSON matching the layout specification.
-
-CRITICAL RULES:
-1. Output language MUST be strictly: $langLabel. Translate all extracted fields to this language (except names, websites, email, and company names).
-2. The output MUST be a valid JSON object matching the exact structure below. Do not output anything else besides JSON.
-3. Enhance the parsed data: write high-quality, professional, ATS-optimized bullet points for experience. Every experience should have 3-5 bullets, starting with action verbs.
-
-JSON Schema to follow:
-{
-  "personalInfo": {
-    "fullName": "Name Surname",
-    "title": "Professional Title (e.g. Senior Software Engineer)",
-    "email": "email@example.com",
-    "phone": "+4219...",
-    "location": "City, Country",
-    "linkedin": "linkedin.com/in/username",
-    "github": "github.com/username",
-    "birthDate": "DD.MM.YYYY",
-    "drivingLicense": "B"
-  },
-  "about": "A powerful 3-4 sentence professional summary focusing on key achievements and skills.",
-  "experience": [
-    {
-      "id": "",
-      "company": "Company Name",
-      "role": "Job Title",
-      "period": "MM/YYYY - MM/YYYY or Present",
-      "rawText": "original notes or text",
-      "bullets": [
-        "Led a team of 4 developers to build a scalable cloud architecture, reducing deployment time by 40%.",
-        "Optimized frontend performance, increasing Core Web Vitals score by 25%."
-      ]
-    }
-  ],
-  "education": [
-    {
-      "id": "",
-      "school": "University Name",
-      "field": "Field of Study / Degree",
-      "period": "YYYY - YYYY"
-    }
-  ],
-  "skills": [
-    {
-      "id": "",
-      "label": "Skill Category (e.g. Programming Languages / Management)",
-      "tags": ["Dart", "Flutter", "JavaScript", "TypeScript"]
-    }
-  ],
-  "languages": [
-    {
-      "id": "",
-      "name": "Slovak",
-      "level": "Native / C2 / B2",
-      "dots": 5
-    }
-  ],
-  "projects": [
-    {
-      "id": "",
-      "name": "Project Name",
-      "description": "Short description of the project and your impact.",
-      "period": "YYYY",
-      "technologies": ["Flutter", "Riverpod"],
-      "url": "https://..."
-    }
-  ],
-  "certificates": [
-    {
-      "id": "",
-      "name": "Certificate Title",
-      "issuer": "Issuer Org",
-      "date": "YYYY",
-      "url": ""
-    }
-  ],
-  "interests": [
-    {
-      "id": "",
-      "name": "Interest Name",
-      "description": "Optional short detail"
-    }
-  ],
-  "references": [
-    {
-      "id": "",
-      "name": "Reference Person Name",
-      "position": "Job Title",
-      "company": "Company",
-      "email": "email@example.com",
-      "phone": "+421..."
-    }
-  ],
-  "achievements": [
-    {
-      "id": "",
-      "title": "Achievement Title",
-      "description": "Detailed description of the success.",
-      "date": "YYYY"
-    }
-  ],
-  "customSections": [],
-  "selectedTemplate": "minimalist",
-  "selectedLanguage": "$language"
-}
-''';
   }
 
   /// Generates clean, high-quality Mock CV data if API is offline/unauthorized
@@ -296,7 +271,9 @@ JSON Schema to follow:
         ? input.split('\n').first.split(',').first.trim()
         : (language == 'sk' ? 'Ján Novák' : 'John Doe');
 
-    final title = language == 'sk' ? 'Senior Flutter Vývojár' : 'Senior Flutter Developer';
+    final title = language == 'sk'
+        ? 'Senior Flutter Vývojár'
+        : 'Senior Flutter Developer';
     final summary = language == 'sk'
         ? 'Skúsený softvérový inžinier so špecializáciou na mobilný vývoj vo Flutteri a tvorbu moderných, responzívnych webových rozhraní. Zameriavam sa na písanie čistého kódu, optimalizáciu výkonu a implementáciu bezchybných používateľských zážitkov (UX).'
         : 'Experienced software engineer specializing in mobile development using Flutter and building modern, responsive web interfaces. Focused on writing clean code, optimizing application performance, and implementing seamless user experiences (UX).';
@@ -307,7 +284,8 @@ JSON Schema to follow:
         title: title,
         email: '${name.toLowerCase().replaceAll(' ', '.')}@example.com',
         phone: '+421 905 123 456',
-        location: language == 'sk' ? 'Bratislava, Slovensko' : 'Bratislava, Slovakia',
+        location:
+            language == 'sk' ? 'Bratislava, Slovensko' : 'Bratislava, Slovakia',
         linkedin: 'linkedin.com/in/${name.toLowerCase().replaceAll(' ', '')}',
         github: 'github.com/${name.toLowerCase().replaceAll(' ', '')}',
         birthDate: '15.08.1993',
@@ -318,7 +296,9 @@ JSON Schema to follow:
         Experience(
           id: uuid.v4(),
           company: 'Tech Solutions a.s.',
-          role: language == 'sk' ? 'Vedúci vývojár mobilných aplikácií' : 'Lead Mobile Application Developer',
+          role: language == 'sk'
+              ? 'Vedúci vývojár mobilných aplikácií'
+              : 'Lead Mobile Application Developer',
           period: '09/2021 - Present',
           bullets: language == 'sk'
               ? [
@@ -353,20 +333,28 @@ JSON Schema to follow:
       education: [
         Education(
           id: uuid.v4(),
-          school: language == 'sk' ? 'Slovenská technická univerzita' : 'Slovak University of Technology',
-          field: language == 'sk' ? 'Aplikovaná informatika (Mgr.)' : 'Applied Informatics (Master\'s Degree)',
+          school: language == 'sk'
+              ? 'Slovenská technická univerzita'
+              : 'Slovak University of Technology',
+          field: language == 'sk'
+              ? 'Aplikovaná informatika (Mgr.)'
+              : 'Applied Informatics (Master\'s Degree)',
           period: '2013 - 2018',
         ),
       ],
       skills: [
         SkillGroup(
           id: uuid.v4(),
-          label: language == 'sk' ? 'Programovacie jazyky' : 'Programming Languages',
+          label: language == 'sk'
+              ? 'Programovacie jazyky'
+              : 'Programming Languages',
           tags: ['Dart', 'TypeScript', 'JavaScript', 'SQL', 'HTML5/CSS3'],
         ),
         SkillGroup(
           id: uuid.v4(),
-          label: language == 'sk' ? 'Frameworky & Knižnice' : 'Frameworks & Libraries',
+          label: language == 'sk'
+              ? 'Frameworky & Knižnice'
+              : 'Frameworks & Libraries',
           tags: ['Flutter', 'Riverpod', 'React', 'Next.js', 'Node.js'],
         ),
         SkillGroup(
@@ -432,7 +420,9 @@ JSON Schema to follow:
       achievements: [
         Achievement(
           id: uuid.v4(),
-          title: language == 'sk' ? '1. miesto na Local Hackathon' : '1st Place at Local Hackathon',
+          title: language == 'sk'
+              ? '1. miesto na Local Hackathon'
+              : '1st Place at Local Hackathon',
           description: language == 'sk'
               ? 'Víťazný projekt v kategórii Smart City aplikácií.'
               : 'Winning project in the Smart City application track.',

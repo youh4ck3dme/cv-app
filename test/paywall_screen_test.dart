@@ -2,8 +2,42 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_cv_app/screens/paywall_screen.dart';
+import 'package:flutter_cv_app/providers/permissions_provider.dart';
+
+class TestPermissionsNotifier extends PermissionsNotifier {
+  bool shouldSucceedRefresh = true;
+
+  TestPermissionsNotifier({bool initialCanExportPDF = false})
+      : super(autoInit: false) {
+    state = PermissionsState(
+      canGenerateCV: true,
+      canExportPDF: initialCanExportPDF,
+      isPremium: initialCanExportPDF,
+      isLoading: false,
+    );
+  }
+
+  @override
+  Future<void> init() async {
+    // Bypass async storage operations
+  }
+
+  @override
+  Future<void> refreshPermissions() async {
+    if (shouldSucceedRefresh) {
+      state = state.copyWith(
+        canExportPDF: true,
+        isPremium: true,
+      );
+    } else {
+      state = state.copyWith(
+        canExportPDF: false,
+        isPremium: false,
+      );
+    }
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -53,17 +87,13 @@ void main() {
       },
       'verification': 'NOT_REQUESTED'
     },
-    'allPurchaseDates': {
-      'premium_weekly': '2026-05-22T00:00:00Z'
-    },
+    'allPurchaseDates': {'premium_weekly': '2026-05-22T00:00:00Z'},
     'activeSubscriptions': ['premium_weekly'],
     'allPurchasedProductIdentifiers': ['premium_weekly'],
     'nonSubscriptionTransactions': [],
     'firstSeen': '2026-05-22T00:00:00Z',
     'originalAppUserId': 'test_user_id',
-    'allExpirationDates': {
-      'premium_weekly': '2026-05-29T00:00:00Z'
-    },
+    'allExpirationDates': {'premium_weekly': '2026-05-29T00:00:00Z'},
     'requestDate': '2026-05-22T00:00:00Z',
     'latestExpirationDate': '2026-05-29T00:00:00Z',
     'originalPurchaseDate': '2026-05-22T00:00:00Z',
@@ -250,10 +280,11 @@ void main() {
   bool shouldFailRestore = false;
   bool delayPurchase = false;
   PlatformException? purchasePlatformException;
+  late TestPermissionsNotifier mockPermissionsNotifier;
 
   setUp(() {
-    SharedPreferences.setMockInitialValues({});
-    
+    mockPermissionsNotifier =
+        TestPermissionsNotifier(initialCanExportPDF: false);
     mockPurchaseResultJson = {
       'customerInfo': mockCustomerInfoJson,
       'transaction': {
@@ -270,7 +301,8 @@ void main() {
     purchasePlatformException = null;
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(purchasesChannel, (MethodCall methodCall) async {
+        .setMockMethodCallHandler(purchasesChannel,
+            (MethodCall methodCall) async {
       switch (methodCall.method) {
         case 'setupPurchases':
         case 'setLogLevel':
@@ -318,8 +350,11 @@ void main() {
 
   Future<void> pumpPaywall(WidgetTester tester) async {
     await tester.pumpWidget(
-      const ProviderScope(
-        child: MaterialApp(
+      ProviderScope(
+        overrides: [
+          permissionsProvider.overrideWith((ref) => mockPermissionsNotifier),
+        ],
+        child: const MaterialApp(
           home: TickerMode(
             enabled: false,
             child: PaywallScreen(),
@@ -330,7 +365,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  testWidgets('PaywallScreen layout and mounting verification', (WidgetTester tester) async {
+  testWidgets('PaywallScreen layout and mounting verification',
+      (WidgetTester tester) async {
     await pumpPaywall(tester);
 
     // Verify critical elements are present
@@ -345,16 +381,17 @@ void main() {
     expect(find.text("Privacy Policy"), findsOneWidget);
   });
 
-  testWidgets('Successful purchase flow and navigation to preview screen', (WidgetTester tester) async {
+  testWidgets('Successful purchase flow and navigation to preview screen',
+      (WidgetTester tester) async {
     delayPurchase = true;
     await pumpPaywall(tester);
 
     // Click on the unlock/purchase button
     await tester.tap(find.text("Unlock and download PDF\n(3 days free)"));
-    
+
     // Pump frames to handle initState/animations and futures
     await tester.pump();
-    
+
     // Verify that the button text changed to show it is processing
     expect(find.text("Processing..."), findsOneWidget);
     expect(
@@ -373,14 +410,16 @@ void main() {
     expect(find.text("No active resume"), findsOneWidget);
   });
 
-  testWidgets('Double-tap prevention disabled state during purchase', (WidgetTester tester) async {
+  testWidgets('Double-tap prevention disabled state during purchase',
+      (WidgetTester tester) async {
     delayPurchase = true;
     await pumpPaywall(tester);
 
     // First tap triggers the purchase flow
     await tester.tap(find.text("Unlock and download PDF\n(3 days free)"));
-    await tester.pump(); // Start execution, widget rebuilds with processing state
-    
+    await tester
+        .pump(); // Start execution, widget rebuilds with processing state
+
     // Try tapping again during processing
     await tester.tap(find.text("Processing..."));
     await tester.pump();
@@ -393,7 +432,9 @@ void main() {
     expect(find.text("No active resume"), findsOneWidget);
   });
 
-  testWidgets('Purchase failure with generic exception displays correct SnackBar', (WidgetTester tester) async {
+  testWidgets(
+      'Purchase failure with generic exception displays correct SnackBar',
+      (WidgetTester tester) async {
     shouldFailPurchase = true;
 
     await pumpPaywall(tester);
@@ -406,7 +447,9 @@ void main() {
     expect(find.text("Purchase failed: Mock purchase error"), findsOneWidget);
   });
 
-  testWidgets('Purchase cancellation is ignored silently without showing SnackBar', (WidgetTester tester) async {
+  testWidgets(
+      'Purchase cancellation is ignored silently without showing SnackBar',
+      (WidgetTester tester) async {
     shouldFailPurchase = true;
     // Code 1 is purchaseCancelledError according to PurchasesErrorCode
     purchasePlatformException = PlatformException(
@@ -424,7 +467,8 @@ void main() {
     expect(find.byType(SnackBar), findsNothing);
   });
 
-  testWidgets('Pending payment shows specific pending SnackBar message', (WidgetTester tester) async {
+  testWidgets('Pending payment shows specific pending SnackBar message',
+      (WidgetTester tester) async {
     shouldFailPurchase = true;
     // Code 20 is paymentPendingError (index of PurchasesErrorCode.paymentPendingError)
     purchasePlatformException = PlatformException(
@@ -439,10 +483,14 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verify pending payment message
-    expect(find.text("Payment is pending. Your premium status will update once completed."), findsOneWidget);
+    expect(
+        find.text(
+            "Payment is pending. Your premium status will update once completed."),
+        findsOneWidget);
   });
 
-  testWidgets('Restore purchases successfully displays success SnackBar', (WidgetTester tester) async {
+  testWidgets('Restore purchases successfully displays success SnackBar',
+      (WidgetTester tester) async {
     await pumpPaywall(tester);
 
     await tester.tap(find.text("Restore Purchases"));
@@ -454,7 +502,8 @@ void main() {
     expect(find.text("No active resume"), findsOneWidget);
   });
 
-  testWidgets('Restore purchases failure displays error SnackBar', (WidgetTester tester) async {
+  testWidgets('Restore purchases failure displays error SnackBar',
+      (WidgetTester tester) async {
     shouldFailRestore = true;
 
     await pumpPaywall(tester);

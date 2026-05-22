@@ -4,19 +4,20 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:printing/printing.dart';
 import '../models/cv_data.dart';
 import '../providers/cv_provider.dart';
+import '../providers/permissions_provider.dart';
 import '../services/pdf_service.dart';
 
 class PreviewScreen extends ConsumerStatefulWidget {
-  final bool isUnlocked;
-  const PreviewScreen({super.key, this.isUnlocked = false});
+  const PreviewScreen({super.key});
 
   @override
   ConsumerState<PreviewScreen> createState() => _PreviewScreenState();
 }
 
-class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTickerProviderStateMixin {
+class _PreviewScreenState extends ConsumerState<PreviewScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  
+
   // Controllers for editing data
   final _nameController = TextEditingController();
   final _titleController = TextEditingController();
@@ -106,6 +107,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
   Widget build(BuildContext context) {
     final cvState = ref.watch(cvProvider);
     final cv = cvState.currentCV;
+    final isUnlocked = ref.watch(permissionsProvider).canExportPDF;
 
     if (cv == null) {
       return Scaffold(
@@ -125,7 +127,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
         backgroundColor: const Color(0xFF000000),
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 20),
+          icon: const Icon(Icons.arrow_back_ios_new,
+              color: Colors.white, size: 20),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: Text(
@@ -142,9 +145,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
           indicatorColor: const Color(0xFFD4AF37), // Gold indicator
           labelColor: Colors.white,
           unselectedLabelColor: const Color(0xFF8E8E93),
-          labelStyle: GoogleFonts.outfit(fontWeight: FontWeight.bold, fontSize: 13),
+          labelStyle:
+              GoogleFonts.outfit(fontWeight: FontWeight.bold, fontSize: 13),
           tabs: const [
-            Tab(text: 'PDF DOCUMENT', icon: Icon(Icons.picture_as_pdf_outlined, size: 20)),
+            Tab(
+                text: 'PDF DOCUMENT',
+                icon: Icon(Icons.picture_as_pdf_outlined, size: 20)),
             Tab(text: 'EDIT DATA', icon: Icon(Icons.edit_note, size: 20)),
           ],
         ),
@@ -153,7 +159,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
         controller: _tabController,
         children: [
           // TAB 1: PDF Document Viewer
-          _buildPdfPreviewTab(cv),
+          _buildPdfPreviewTab(cv, isUnlocked),
 
           // TAB 2: Text / Details editor
           _buildEditorTab(cv),
@@ -162,31 +168,151 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
     );
   }
 
-  Widget _buildPdfPreviewTab(CVData cv) {
-    return Container(
-      color: const Color(0xFF000000),
-      child: PdfPreview(
-        build: (format) => PdfService.generatePdf(cv),
-        loadingWidget: const Center(
-          child: CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF9C27B0)),
+  Widget _buildPdfPreviewTab(CVData cv, bool isUnlocked) {
+    return Stack(
+      children: [
+        Container(
+          color: const Color(0xFF000000),
+          child: PdfPreview(
+            build: (format) =>
+                PdfService.generatePdf(cv, isPremium: isUnlocked),
+            loadingWidget: const Center(
+              child: CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF9C27B0)),
+              ),
+            ),
+            pdfPreviewPageDecoration: const BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Color(0x0DFFFFFF), // white with 5% opacity
+                  blurRadius: 8,
+                  offset: Offset(0, 4),
+                )
+              ],
+            ),
+            allowPrinting: isUnlocked,
+            allowSharing: isUnlocked,
+            canChangePageFormat: false,
+            canChangeOrientation: false,
           ),
         ),
-        pdfPreviewPageDecoration: const BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(
-              color: Color(0x0DFFFFFF), // white with 5% opacity
-              blurRadius: 8,
-              offset: Offset(0, 4),
-            )
-          ],
-        ),
-        allowPrinting: true,
-        allowSharing: true,
-        canChangePageFormat: false,
-        canChangeOrientation: false,
-      ),
+        if (!isUnlocked)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0x00000000),
+                    Color(0xD9000000),
+                    Colors.black,
+                  ],
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: const Color(0xE61C1C1E),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: const Color(0x4DD4AF37),
+                        width: 1.5,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x269C27B0),
+                          blurRadius: 20,
+                          spreadRadius: 2,
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: const BoxDecoration(
+                                color: Color(0x26D4AF37),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.lock_outline,
+                                color: Color(0xFFD4AF37),
+                                size: 24,
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Unlock Premium Access',
+                                    style: GoogleFonts.outfit(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Upgrade to premium to print, share, or download your ATS-optimized PDF resume.',
+                                    style: GoogleFonts.inter(
+                                      color: Colors.white70,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 18),
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.pushNamed(context, '/paywall');
+                          },
+                          child: Container(
+                            width: double.infinity,
+                            height: 48,
+                            decoration: const BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [Color(0xFF9C27B0), Color(0xFFD4AF37)],
+                              ),
+                              borderRadius:
+                                  BorderRadius.all(Radius.circular(12)),
+                            ),
+                            child: Center(
+                              child: Text(
+                                'UNLOCK NOW',
+                                style: GoogleFonts.outfit(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1.0,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -220,9 +346,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
             ),
             const SizedBox(height: 12),
             _buildInputField('Location', _locationController),
-            
+
             const SizedBox(height: 28),
-            
+
             Text(
               'Professional Summary (About Me)',
               style: GoogleFonts.outfit(
@@ -243,18 +369,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
                 width: double.infinity,
                 height: 54,
                 decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Color(0xFF9C27B0), Color(0xFFD4AF37)],
-                  ),
-                  borderRadius: BorderRadius.all(Radius.circular(14)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Color(0x339C27B0), // Purple with 20% opacity
-                      blurRadius: 10,
-                      offset: Offset(0, 4),
-                    )
-                  ]
-                ),
+                    gradient: LinearGradient(
+                      colors: [Color(0xFF9C27B0), Color(0xFFD4AF37)],
+                    ),
+                    borderRadius: BorderRadius.all(Radius.circular(14)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Color(0x339C27B0), // Purple with 20% opacity
+                        blurRadius: 10,
+                        offset: Offset(0, 4),
+                      )
+                    ]),
                 child: Center(
                   child: Text(
                     'SAVE CHANGES',
@@ -275,7 +400,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
     );
   }
 
-  Widget _buildInputField(String label, TextEditingController controller, {int maxLines = 1}) {
+  Widget _buildInputField(String label, TextEditingController controller,
+      {int maxLines = 1}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -302,7 +428,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> with SingleTicker
             maxLines: maxLines,
             style: GoogleFonts.inter(color: Colors.white, fontSize: 14),
             decoration: const InputDecoration(
-              contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               border: InputBorder.none,
             ),
           ),

@@ -77,17 +77,20 @@
         <h2>1. Zhromažďovanie a zber dát (Data Collection)</h2>
         <p>Pre správne fungovanie aplikácie a jej kľúčových funkcií môžeme spracúvať nasledujúce typy údajov:</p>
         <ul>
-            <li><span class="highlight">Fotografie / Obrázky:</span> Aplikácia umožňuje používateľom nahrávať fotografie a obrázky za účelom analýzy dizajnu izby alebo spracovania životopisov (CV).</li>
-            <li><span class="highlight">Textové vstupy:</span> Texty zadané používateľom na analýzu a spracovanie.</li>
+            <li><span class="highlight">Fotografie / Obrázky:</span> Aplikácia umožňuje používateľom nahrávať fotografie a obrázky za účelom spracovania, skenovania a optimalizácie životopisov (CV).</li>
+            <li><span class="highlight">Textové vstupy:</span> Texty zadané používateľom na analýzu, prepis a spracovanie životopisov.</li>
             <li><span class="highlight">Technické údaje:</span> Verzia operačného systému, chybové hlásenia (crash logs) a identifikátory zariadenia slúžiace na diagnostiku a stabilitu aplikácie.</li>
         </ul>
         <h2>2. Bezpečnosť a prenos dát (Data Security & Transmission)</h2>
         <p>Všetky prenášané dáta sú zabezpečené šifrovaným protokolom <span class="highlight">HTTPS</span> počas celého prenosu z aplikácie na naše API servery, čím predchádzame ich odchyteniu neoprávnenými osobami.</p>
-        <h2>3. Zdieľanie dát s tretími stranami (Third-party Sharing)</h2>
+        <h2>3. Zdieľanie dát s tretími stranami a AI spracovanie (Third-party Sharing & AI Processing)</h2>
         <p>Pre zabezpečenie plnej funkčnosti aplikácie spolupracujeme s preverenými poskytovateľmi služieb:</p>
         <ul>
             <li><strong>Google Play Billing & RevenueCat:</strong> Spracovanie a správa predplatného a in-app nákupov. Citlivé platobné údaje sú spracovávané výhradne týmito službami a nikdy sa neukladajú u nás.</li>
-            <li><strong>AI Služby (Gemini API / Mistral AI):</strong> Vstupné obrázky a texty sú posielané na servery poskytovateľov umelej inteligencie výhradne za účelom vygenerovania spätnej väzby, dizajnu alebo analýzy (funkčnosť aplikácie).</li>
+            <li><strong>Spracovanie umelou inteligenciou (AI Gateway):</strong> Vstupné texty a obrázky starých životopisov sú prenášané prostredníctvom nášho zabezpečeného proxy servera (AI Gateway) na API rozhranie poskytovateľa Mistral AI / Gemini API.</li>
+            <li><strong>Účel spracovania:</strong> Tieto údaje sú spracovávané výhradne na účely analýzy, korekcie, prekladu a vygenerovania štruktúrovaného profesionálneho životopisu vo formáte PDF.</li>
+            <li><strong>Uchovávanie a trénovanie:</strong> Poskytovatelia AI služieb nepoužívajú Vaše osobné údaje ani texty životopisov na trénovanie modelov umelej inteligencie a neuchovávajú ich dlhšie, než je potrebné na spracovanie Vašej požiadavky.</li>
+            <li><strong>Odvolať súhlas (Consent Withdrawal):</strong> Spracovanie údajov prebieha výhradne na základe Vášho výslovného súhlasu. Tento súhlas môžete kedykoľvek jednoducho odvolať priamo v aplikácii (odznačením príslušného boxu v sekcii nahrávania). Po odvolaní súhlasu nebudú žiadne Vaše dáta odosielané na AI analýzu.</li>
         </ul>
         <h2>4. Právo na vymazanie údajov (Data Deletion Request)</h2>
         <p>Používateľ má plné právo kedykoľvek požiadať o vymazanie svojich údajov. Ak si želáte odstrániť svoje údaje alebo účet, kontaktujte nás na e-maile: <span class="highlight">developer@larsenevans.com</span>. Vaša žiadosť bude spracovaná bezodkladne.</p>

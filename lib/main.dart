@@ -1,11 +1,28 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:purchases_flutter/purchases_flutter.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/paywall_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize RevenueCat SDK safely
+  try {
+    await Purchases.setLogLevel(LogLevel.debug);
+    if (Platform.isAndroid) {
+      await Purchases.configure(
+          PurchasesConfiguration("goog_placeholder_api_key"));
+    } else if (Platform.isIOS) {
+      await Purchases.configure(
+          PurchasesConfiguration("appl_placeholder_api_key"));
+    }
+  } catch (e) {
+    debugPrint("Failed to initialize RevenueCat Purchases: $e");
+  }
+
   runApp(
     const ProviderScope(
       child: AntigravityCvApp(),
@@ -27,7 +44,7 @@ class AntigravityCvApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF000000), // AMOLED Pure Black
         primaryColor: const Color(0xFF9C27B0), // Purple
-        
+
         // Setup color scheme with purple and gold accents
         colorScheme: const ColorScheme.dark(
           brightness: Brightness.dark,
@@ -88,7 +105,8 @@ class AntigravityCvApp extends StatelessWidget {
           }),
           trackColor: WidgetStateProperty.resolveWith<Color?>((states) {
             if (states.contains(WidgetState.selected)) {
-              return const Color(0x809C27B0); // Purple track when selected (50% opacity = 0x80)
+              return const Color(
+                  0x809C27B0); // Purple track when selected (50% opacity = 0x80)
             }
             return Colors.white12;
           }),

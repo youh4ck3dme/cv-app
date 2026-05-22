@@ -1,4 +1,3 @@
-
 class PersonalInfo {
   final String fullName;
   final String title;

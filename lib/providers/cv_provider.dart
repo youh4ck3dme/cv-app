@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/cv_data.dart';
 import '../services/ai_service.dart';
+// Note: Only AiGateway and ConsentGuard are exported from ai_service.dart.
+// The underlying _AiService is file-private to ensure compiler-enforced zero-leak architectural boundaries.
 
 class CVState {
   final List<CVData> history;
@@ -42,17 +44,17 @@ class CVNotifier extends StateNotifier<CVState> {
   }
 
   static const String _historyKey = 'cv_history_data';
+  static const _storage = FlutterSecureStorage();
 
-  /// Loads CV history from SharedPreferences
+  /// Loads CV history from secure storage
   Future<void> loadHistory() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final historyRaw = prefs.getStringList(_historyKey);
+      final historyRaw = await _storage.read(key: _historyKey);
       if (historyRaw != null) {
-        final loaded = historyRaw.map((item) {
-          final Map<String, dynamic> decoded = jsonDecode(item);
-          return CVData.fromJson(decoded);
-        }).toList();
+        final List<dynamic> decodedList = jsonDecode(historyRaw);
+        final loaded = decodedList
+            .map((item) => CVData.fromJson(item as Map<String, dynamic>))
+            .toList();
         state = state.copyWith(history: loaded);
       }
     } catch (e) {
@@ -60,15 +62,14 @@ class CVNotifier extends StateNotifier<CVState> {
     }
   }
 
-  /// Saves a CV to history and SharedPreferences
+  /// Saves a CV to history using secure storage
   Future<void> saveToHistory(CVData cv) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      
       // Prevent duplicates (based on name & title)
       final existingIndex = state.history.indexWhere(
-        (item) => item.personalInfo.fullName == cv.personalInfo.fullName &&
-                  item.personalInfo.title == cv.personalInfo.title
+        (item) =>
+            item.personalInfo.fullName == cv.personalInfo.fullName &&
+            item.personalInfo.title == cv.personalInfo.title,
       );
 
       final List<CVData> updatedHistory = List.from(state.history);
@@ -78,9 +79,9 @@ class CVNotifier extends StateNotifier<CVState> {
         updatedHistory.insert(0, cv); // Insert at beginning
       }
 
-      final historyRaw = updatedHistory.map((item) => jsonEncode(item.toJson())).toList();
-      await prefs.setStringList(_historyKey, historyRaw);
-      
+      final encoded = jsonEncode(updatedHistory);
+      await _storage.write(key: _historyKey, value: encoded);
+
       state = state.copyWith(history: updatedHistory);
     } catch (e) {
       state = state.copyWith(errorMessage: 'Error saving CV: $e');
@@ -90,13 +91,10 @@ class CVNotifier extends StateNotifier<CVState> {
   /// Deletes a CV from history
   Future<void> deleteCV(int index) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
       final List<CVData> updatedHistory = List.from(state.history);
       updatedHistory.removeAt(index);
-
-      final historyRaw = updatedHistory.map((item) => jsonEncode(item.toJson())).toList();
-      await prefs.setStringList(_historyKey, historyRaw);
-
+      final encoded = jsonEncode(updatedHistory);
+      await _storage.write(key: _historyKey, value: encoded);
       state = state.copyWith(history: updatedHistory);
     } catch (e) {
       state = state.copyWith(errorMessage: 'Error deleting CV: $e');
@@ -124,7 +122,7 @@ class CVNotifier extends StateNotifier<CVState> {
     state = state.copyWith(isLoading: true, errorMessage: null);
 
     try {
-      final generatedCv = await AiService.parseResume(
+      final generatedCv = await AiGateway.generate(
         rawText: rawText,
         base64Image: base64Image,
         language: language,
